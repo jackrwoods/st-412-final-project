@@ -1,0 +1,282 @@
+---
+title: "Final Project - OSU Building Data Analysis"
+author: "Jack Woods"
+date: "3/13/2020"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+rm(list = ls(all.names = TRUE)) # Clear r workspace
+library(ggplot2) # Include ggplot for graphs
+library(here) # Allows r to use real relative paths to files
+library(httr) # For sending HTTP requests
+library(jsonlite) # For parsing JSON data from IEX Cloud API
+library(parsedate) # For interpreting time series information in data
+
+# Set the working directory
+knitr::opts_chunk$set(echo = TRUE, root.dir=here())
+
+# Read the data
+energyData <- data.frame(read.csv("../Data/combinedElectricityData.csv"))
+weatherData <- data.frame(read.csv("../Data/noaaWeather.csv"))
+sqftData <- data.frame(read.csv("../Data/sqft.csv"))
+
+# Treat the square footage data as a number, not a factor
+sqftData$sqft <- as.numeric(as.character(sqftData$sqft))
+
+# Removing outliers/anomilies because inaccurate observations were made
+energyData <- energyData[energyData$kWh > 0,]
+energyData <- energyData[energyData$kWh < 1000,]
+
+# Parse dates into a format compatible with r
+energyData$Time <- as.Date(parse_date(energyData$Time))
+weatherData$DATE <- as.Date(parse_date(weatherData$DATE))
+
+# Sum daily total consumption
+energyDailyTotals <- aggregate(energyData$kWh, by = list(energyData$Time, energyData$Building, energyData$Type), sum)
+
+# Rename the columns
+colnames(energyDailyTotals)[1] <- "Date"
+colnames(energyDailyTotals)[2] <- "Building"
+colnames(energyDailyTotals)[3] <- "Type"
+colnames(energyDailyTotals)[4] <- "kWh"
+colnames(weatherData)[6] <- "Date"
+
+# Add a column for each day of the week
+energyDailyTotals$dayOfWeek <- weekdays(energyDailyTotals$Date)
+energyDailyTotals$Month <- months(energyDailyTotals$Date)
+
+# Merge the weather and energy data into one dataframe
+energyDailyTotals <- merge(energyDailyTotals, weatherData, by = "Date")
+
+# Merge the square footage data and energy data into one dataframe
+energyDailyTotals <- merge(energyDailyTotals, sqftData, by = "Building")
+
+# Calculate electricity consumption per square foot
+energyDailyTotals$epsf <- energyDailyTotals$kWh / energyDailyTotals$sqft
+
+# Add an ID column to create a unique set key
+energyDailyTotals$ID <- seq.int(nrow(energyDailyTotals))
+
+# Add a temperature column
+energyDailyTotals$Temperature <- (energyDailyTotals$TMAX + energyDailyTotals$TMIN)/2
+
+# A vector containing month names
+months <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+# Add a column describing whether the date is during the academic year or a break
+energyDailyTotals$isNotABreakMonth <- (energyDailyTotals$Month != "June" & energyDailyTotals$Month != "July" & energyDailyTotals$Month != "August" & energyDailyTotals$Month != "September" & energyDailyTotals$Month != "December")
+```
+
+# Introduction
+In 2007, Oregon State University (OSU) President Ed Ray signed the American College and University Presidents Climate Commitment, pledging institution-wide carbon neutrality by 2025. Normalized for growth, OSU has since reduced carbon emissions by 41% per student per square foot of building space; however, greenhouse gas emissions have only declined by 12% overall. OSU's current annual carbon footprint is equivalent to over 15,000 average American homes, totalling over 134,000 metric tons of $CO_2e$ ($CO_2$ equivalent emissions). Although significant progress has been made, carbon neutrality will not be achieved by 2025 unless additional emissions reductions can be achieved.
+
+![Emissions Pie Chart](../documents/pie_gross_emissions.jpg)
+
+![Emissions Per Student](../documents/normalized1.jpg)
+
+The OSU Sustainability Office reports that electricity consumption accounts for approximately 75% of OSU's carbon emissions. Thus, understanding electricity consumption patterns is a critical step towards advancing OSU's emissions reduction initiatives. As Climate Change contributes to increasingly unstable climate/weather/temperatures worldwide, understanding the connection between OSU's electricity consumption and Corvallis's weather is critical for determining:
+
+  - The effects of Climate Change on OSU's electricity consumption patterns.
+  - Whether Global Warming/Climate Change will cause campus-wide energy consumption to decrease or increase.
+  - Other patterns in daily, weekly, monthly, quarterly, or seasonal consumption.
+  
+This project aims to connect weather conditions to energy consumption in buildings across OSU's Corvallis Campus by comparing energy, building, and weather data from June 1, 2018 to March 7, 2020. Daily electricity consumption data is limited by the availability of real time electricity meter reporting hardware. Only approximately 30 buildings on OSU's campus have data acquisition servers installed, which severely limits the amount of data available. Of these 30 buildings, a subset were selected to ensure that academic, residential, sports-related, and events spaces were represented in our sample.
+
+# Methods
+
+## Data Collection
+Weather data was requested through the U.S. National Oceanic and Atmospheric Administration's (NOAA) National Centers for Environmental Information Climate Data Online Search platform. Automated precipitation and temperature data were collected by an automated weather station (NOAA ID: USW00004236) located near Corvallis, OR. Electricity consumption data was collected using Acquisuite Data Acquisition Servers connected to electrical meters in OSU buildings via a modbus connection. The data was aggregated in a cloud database using OSU's Energy Dashboard web application. Building square footage data was provided by request by the OSU Sustainability Office.
+
+## Design
+
+```{r, echo=FALSE}
+# Scatterplot, Electricity Consumption vs. Temperature
+ggplot(data=energyDailyTotals, aes(x=Temperature, y=epsf, color=Building)) +
+  geom_point() +
+  ggtitle("Figure 1: Electricity Consumption vs. Temperature by Building")+
+  xlab("Average Temperature (F)") +
+  ylab("Electricity Consumption (kWh/sq. ft)")
+```
+
+In **Figure 1**, many trends can be observed:
+
+  - As *TMIN* and *TMAX* increase, *epsf* decreases.
+  - Different buildings exhibit different energy consumption densities per square foot, indicating that *Building* may play a large role in determining *epsf*. This is likely due to the fact that buildings were constructed over a long time period and contain unique HVAC systems of varying efficiency and complexity.
+  - Electricity consumption trends vary between buildings. Some buildings exhibit an increase in electricity consumption above 70 degrees Fahrenheit, resulting in a concave upward curvature in the scatterplot. Others do not exhibit the same increase. This is likely a result of air conditioning systems that are installed on some, but not all, buildings.
+
+```{r, echo=FALSE}
+# Boxplot, Electricity Consumption vs. Day of Week
+ggplot(data=energyDailyTotals, aes(x=factor(dayOfWeek), y=epsf, color=Temperature)) +
+  geom_boxplot() +
+  geom_point() +
+  ggtitle("Figure 2: Electricity Consumption by Day of the Week") +
+  xlab("Week Day") +
+  ylab("Electricity Consumption (kWh/sq. ft)") +
+  scale_color_continuous(name="Temperature (F)")
+
+# Boxplot, Electricity Consumption vs. Month
+ggplot(data=energyDailyTotals, aes(x=factor(Month), y=epsf, color=Temperature)) +
+  geom_boxplot() +
+  geom_point() +
+  ggtitle("Figure 3: Electricity Consumption by Month") +
+  xlab("Month") +
+  ylab("Electricity Consumption (kWh/sq. ft)") +
+  scale_color_continuous(name="Temperature (F)") +
+  scale_x_discrete(labels=months)
+```
+ 
+**Figure 2** and **Figure 3** reveal that electricity consumption trends vary widely month-to-month and day-to-day. This reflects building occupancy trends across campus. During summer months and December, typical building utilization is disrupted by students leaving for breaks. This is most likely what is reflected in building electricity consumption.
+
+```{r, echo=FALSE}
+# Boxplot, Electricity Consumption vs. Temperature, Buxton
+ggplot(data=energyDailyTotals[energyDailyTotals$Building == "Buxton Hall" | energyDailyTotals$Building == "International Living Learning Center",], aes(x=factor(parse_date(Month)), y=epsf, color=Building)) +
+  geom_boxplot() +
+  ggtitle("Figure 4: Buxton Hall and ILLC Electricity Consumption by Month") +
+  xlab("Month") +
+  ylab("Electricity Consumption (kWh/sq. ft)") +
+  scale_color_discrete(name="Building") +
+  scale_x_discrete(labels=months)
+```
+
+**Figure 4** depicts Buxton Hall and the International Living Learning Center's (ILLC) electricity consumption. Note the significant decline in electricity consumption during Summer and Winter Break (June, July, August, September, and December). Although the International Living Learning Center(ILLC) is classified as a residence hall in our dataset, the ILLC contains a coffee shop, convenience store, multiple classrooms, and many offices on the first floor. In contrast, Buxton Hall is strictly a residence hall. I believe the difference in energy consumption trends is explained by the usage trends of the various spaces within the building. This information is captured on a macro scale by the *Type* effect, but is not captured on a micro scale.
+
+```{r, echo=FALSE}
+# Boxplot, Electricity Consumption vs. Precipitation
+ggplot(data=energyDailyTotals, aes(x=PRCP, y=epsf, color=Temperature)) +
+  geom_point() +
+  ggtitle("Figure 5: Electricity Consumption by Quantity of Precipitation") +
+  xlab("Precipitation (Inches)") +
+  ylab("Electricity Consumption (kWh/sq. ft)") +
+  scale_color_continuous(name="Temperature (F)")
+
+# Boxplot, Electricity Consumption vs. Precipitation
+ggplot(data=energyDailyTotals, aes(x=Temperature, y=PRCP)) +
+  geom_point() +
+  ggtitle("Figure 6: Interaction Plot - Temperature vs Precipitation") +
+  xlab("Temperature (F)") +
+  ylab("Precipitation (Inches)")
+```
+
+**Figure 5** plots *epsf* and daily *PRCP* in Corvallis and reveals no clear correlation between precipitation and electricity consumption. **Figure 6** illustrates little to no interaction between *Temperature* and *PRCP*. Although I initially thought that the quantity of precipitation would be correlated with higher electricity consumption (since students would likely spend more time indoors), this does not appear to be true.
+
+To summarize everything:
+
+  - There is a correlation between temperature and electricity consumption.
+  - Each building and building type have unique consumption trends.
+  - Buildings exhibit different energy trends throughout the year. *Month* is likely to be significant in the linear model.
+  - Electricity consumption trends follow cyclic secondary trends on a weekly basis.
+
+For this report, a least squares linear regression model will be created to find a relationship between outside air temperature and building electricity consumption. In this case, a linear model is a convenient tool because it provides mechanisms which allow an analyst to study the effect of one explanatory variable on the response variable while holding all other factors constant. For example, a slope coefficient would provide a sufficient link between changes in electricity consumption explained by changes in outside air temperature.
+
+## The Model
+
+```{r, echo=FALSE}
+fullModel <- lm(data=energyDailyTotals, epsf ~ TMAX + TMIN + I(TMAX^2) + I(TMIN^2) + Building + Type + PRCP + Month + dayOfWeek)
+summary(fullModel)
+anova(fullModel)
+```
+
+The initial ANOVA test found *PRCP*, *Type*, and the squared *TMAX* terms to be insignificant. Interestingly, the other temperatures appear to be significant. This is likely because the minimum and maximum temperatures are highly correlated with one another (Correlation is `r cor(energyDailyTotals$TMAX, energyDailyTotals$TMIN)`. Removing *PRCP* and *Type* from the model, we obtain:
+
+```{r, echo=FALSE}
+redModel1 <- lm(data=energyDailyTotals, epsf ~ TMAX + TMIN + I(TMAX^2) + I(TMIN^2) + Building + Month + dayOfWeek)
+summary(redModel1)
+anova(fullModel, redModel1)
+```
+
+The ESS F-test results provide overwhelming evidence in favor of the reduced model. This reveals that categorizing the buildings by "Type" (Academic, Residential, etc) is not useful for our analysis. This is likely because most buildings are vastly different from one another, even within the same category. Additionally, the categories do not accurately account for the various spaces within each building (such as the cafe in LINC or the offices in some of the residence halls).
+
+This model does not consider the correlation between temperatures, however. To construct the final model, we remove the squared *TMAX* term and create an interaction term between *Building* and the squared *TMIN* term. Lastly, we introduce a interaction terms between *Building* and *Month* & *dayOfWeek*.
+
+```{r, echo=FALSE}
+redModel2 <- lm(data=energyDailyTotals, epsf ~ TMAX + TMIN + I(TMIN^2) * Building + Building * Month + Building * dayOfWeek + Building + Month + dayOfWeek)
+summary(redModel2)
+anova(redModel2)
+```
+
+The interaction terms were included in this model because:
+
+  - Some buildings exhibited curvature in **Figure 1**, while others did not.
+  - Electricity consumption in residence halls decreases significantly over the summer months, while academic buildings exhibit different effects.
+  - Some buildings, such as residence halls, have similar occupancy on weekends vs weekdays while academic buildings do not.
+
+Overall, this change improved the $R^2$ and $R^2_{adj}$ values significantly.
+
+# Results
+
+Overall, the final model captures electricity consumption trends reasonably well. **Figure 7** depicts relatively consistent and small residuals, and **Figure 8** shows predicted kWh daily consumption for the Memorial Union. Considering that many factors (such as building occupancy, age, and HVAC system types) were not specifically addressed in the model, I believe the model performs well.
+
+```{r, echo=FALSE}
+predicted <- energyDailyTotals
+predicted$epsf <- predict(redModel2, predicted)
+predicted$residuals<- predicted$epsf - energyDailyTotals$epsf
+
+# Scatterplot, Electricity Consumption vs. Temperature
+ggplot(data=predicted, aes(x=Temperature, y=residuals, color=Building)) +
+  geom_point() +
+  ggtitle("Figure 7: Residuals Plot") +
+  xlab("Average Temperature (F)") +
+  ylab("Electricity Consumption (kWh/sq. ft)")
+
+# Scatterplot, Electricity Consumption vs. Temperature
+ggplot(data=energyDailyTotals[energyDailyTotals$Building == "Memorial Union",], aes(x=Date, y=I(epsf * sqft))) +
+  geom_line(aes(color="black"), size=1) +
+  ggtitle("Figure 8: MU Electricity Consumption, Model vs. Real Data")+
+  xlab("Date") +
+  ylab("Electricity Consumption (kWh/sq. ft)") +
+  geom_line(aes(color="red"), data=predicted[predicted$Building == "Memorial Union",], size=1) +
+  scale_color_discrete(name = "Dataset", labels=c("Actual Consumption", "Model Output"))
+```
+
+
+# Discussion
+
+It is important to note that inferences derived from the model will be limited by the following:
+  
+### Location Constraints
+The data collected for this project originates at only the Corvallis Campus. The results of this report may not accurately project electricity consumption trends across all OSU-owned properties. Additionally, a small subset of OSU buildings in Corvallis were used to construct this model.
+
+### Limited Time-Series Data
+All of the data used in this report spans less than two years of consumption data. To really understand long term electricity consumption trends, a broader time span is required for accurate prediction.
+
+### Correlation & Colinearity
+For simplicity, the model does not account for correlation between neighboring time-series observations. Additionally, the model does not consider the correlation that may exist between *Temperature* & *Month* or *Temperature* and *Year*.
+
+For the purposes of this Final Project, the findings in this report are sufficient for finding a link between climate changes and electricity consumption trends. I do not believe the findings of this report are sufficient grounds for institutional decision-making; however, with more data, time, and resources, I believe a more accurate model could be produced that accurately projects energy consumption over a longer time interval. As OSU continues to expand smart metering programs and develops novel ways to collect more building data (such as building occupancy, or device-specific electric metering), an accurate model could be created.
+
+# Conclusions
+
+Maximum and minimum daily temperatures have a statistically significant effect on building electricity consumption. For each 1 degree increase in maximum temperature, facility operators can expect a 0.00004756 increase in *kWh/sq. ft.* consumption campus wide. The effect of minimum temperature changes is hard to quantify because it is almost negligible campus wide but varies immensely by building. **Figure 9** depicts the effect of a 2 degree celsius increase in daily temperature.
+
+```{r, echo=FALSE}
+# Calculate electricity consumption with temperatures approximately 2 degrees celsius higher (3.6 F)
+estimatedConsumption <- energyDailyTotals
+estimatedConsumption$TMAX <- energyDailyTotals$TMAX + 3.6
+estimatedConsumption$TMIN <- energyDailyTotals$TMIN + 3.6
+estimatedConsumption$epsf <- predict(redModel2, estimatedConsumption)
+estimatedConsumption$change <- estimatedConsumption$epsf - energyDailyTotals$epsf
+ggplot(data=estimatedConsumption, aes(x=Temperature, y=change - predicted$residuals)) +
+  geom_point(color="gray") +
+  geom_smooth(method="lm") +
+  ggtitle("Figure 9: Estimated Change in Electricity Consumption") +
+  ylab("Change in kWh/Sq. ft. vs Actual Data") +
+  xlab("Temperature (F)")
+```
+
+With a 2 degree Celsius increase in average temperature, OSU's facility operators can expect an increase in electricity consumption if the mean outside air temperature is greater than 55 F, and a decrease in electricity consumption otherwise.
+
+# Informal Sources Cited
+
+OSU Carbon Commitment and Emissions Statistics - https://fa.oregonstate.edu/sustainability/planning-policy-assessment/institutional-carbon-neutrality
+
+Carbon Emissions Breakdown - https://fa.oregonstate.edu/sustainability/planning-policy-assessment/institutional-carbon-neutrality/emissions-measurement-and
+
+Electricity Data - https://dashboard.sustainability.oregonstate.edu/
+
+Weather Data - https://www.ncdc.noaa.gov/cdo-web/
+
+Building Square Footage and Other Data - Available upon request from the OSU Sustainability Office. Contact Lety: leticia.cavazos@oregonstate.edu
